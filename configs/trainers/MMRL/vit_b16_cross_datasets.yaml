@@ -35,5 +35,5 @@ TRAINER:
     REG_WEIGHT: 0.2
     N_REP_TOKENS: 5
     REP_LAYERS: [6, 7, 8, 9, 10, 11, 12]
-    PREC: "amp"
+    PREC: "fp32"
     REP_DIM: 512

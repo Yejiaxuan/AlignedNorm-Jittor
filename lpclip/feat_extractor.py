@@ -1,9 +1,9 @@
 import os, argparse
 import numpy as np
-import torch
+import jittor as jt
 import sys
 
-sys.path.append(os.path.abspath(".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datasets.oxford_pets import OxfordPets
 from datasets.oxford_flowers import OxfordFlowers
@@ -52,6 +52,9 @@ def reset_cfg(cfg, args):
     if args.output_dir:
         cfg.OUTPUT_DIR = args.output_dir
 
+    if args.seed >= 0:
+        cfg.SEED = args.seed
+
     if args.trainer:
         cfg.TRAINER.NAME = args.trainer
 
@@ -80,6 +83,15 @@ def extend_cfg(cfg):
     cfg.TRAINER.OURS.CSC = False  # class-specific context
     cfg.TRAINER.OURS.CTX_INIT = ""  # initialize context vectors with given words
     cfg.TRAINER.OURS.WEIGHT_U = 0.1  # weight for the unsupervised loss
+    cfg.DATASET.SUBSAMPLE_CLASSES = "all"
+    cfg.DATALOADER.TRAIN_X.BATCH_SIZE = 64
+    cfg.DATALOADER.NUM_WORKERS = 8
+    cfg.INPUT.SIZE = (224, 224)
+    cfg.INPUT.INTERPOLATION = "bicubic"
+    cfg.INPUT.PIXEL_MEAN = [0.48145466, 0.4578275, 0.40821073]
+    cfg.INPUT.PIXEL_STD = [0.26862954, 0.26130258, 0.27577711]
+    cfg.INPUT.TRANSFORMS = ("center_crop", "normalize")
+    cfg.MODEL.BACKBONE.NAME = "RN50"
 
 
 def setup_cfg(args):
@@ -109,8 +121,7 @@ def main(args):
         set_random_seed(cfg.SEED)
     setup_logger(cfg.OUTPUT_DIR)
 
-    if torch.cuda.is_available() and cfg.USE_CUDA:
-        torch.backends.cudnn.benchmark = True
+    jt.flags.use_cuda = 1 if cfg.USE_CUDA else 0
 
     print_args(args, cfg)
     print("Collecting env info ...")
@@ -129,41 +140,40 @@ def main(args):
         dataset_input = dataset.test
 
     tfm_train = build_transform(cfg, is_train=False)
-    data_loader = torch.utils.data.DataLoader(
-        DatasetWrapper(cfg, dataset_input, transform=tfm_train, is_train=False),
+    data_loader = DatasetWrapper(
+        cfg, dataset_input, transform=tfm_train, is_train=False
+    ).set_attrs(
         batch_size=cfg.DATALOADER.TRAIN_X.BATCH_SIZE,
-        sampler=None,
         shuffle=False,
         num_workers=cfg.DATALOADER.NUM_WORKERS,
         drop_last=False,
-        pin_memory=(torch.cuda.is_available() and cfg.USE_CUDA),
     )
 
     ########################################
     #   Setup Network
     ########################################
-    clip_model, _ = clip.load("RN50", "cuda", jit=False)
+    if not args.clip_weights:
+        raise ValueError(
+            "Jittor RN50 weights are required; pass --clip-weights or set JITTOR_RN50_WEIGHTS"
+        )
+    device = "cuda" if cfg.USE_CUDA else "cpu"
+    clip_model, _ = clip.load(args.clip_weights, device, jit=False)
     clip_model.eval()
     ###################################################################################################################
     # Start Feature Extractor
     feature_list = []
     label_list = []
-    train_dataiter = iter(data_loader)
-    for train_step in range(1, len(train_dataiter) + 1):
-        batch = next(train_dataiter)
-        data = batch["img"].cuda()
-        feature = clip_model.visual(data)
-        feature = feature.cpu()
-        for idx in range(len(data)):
-            feature_list.append(feature[idx].tolist())
-        label_list.extend(batch["label"].tolist())
+    with jt.no_grad():
+        for batch in data_loader:
+            feature_list.append(clip_model.visual(batch["img"]).numpy())
+            label_list.append(batch["label"].numpy())
     save_dir = os.path.join(cfg.OUTPUT_DIR, cfg.DATASET.NAME)
     os.makedirs(save_dir, exist_ok=True)
     save_filename = f"{args.split}"
     np.savez(
         os.path.join(save_dir, save_filename),
-        feature_list=feature_list,
-        label_list=label_list,
+        feature_list=np.concatenate(feature_list, axis=0),
+        label_list=np.concatenate(label_list, axis=0),
     )
 
 
@@ -185,5 +195,11 @@ if __name__ == "__main__":
     parser.add_argument("--head", type=str, default="", help="name of head")
     parser.add_argument("--seed", type=int, default=-1, help="only positive value enables a fixed seed")
     parser.add_argument("--eval-only", action="store_true", help="evaluation only")
+    parser.add_argument(
+        "--clip-weights",
+        type=str,
+        default=os.environ.get("JITTOR_RN50_WEIGHTS", ""),
+        help="converted Jittor RN50 checkpoint",
+    )
     args = parser.parse_args()
     main(args)

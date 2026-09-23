@@ -14,4 +14,4 @@ sh linear_probe.sh
 
 We follow the instructions stated in the Appendix A3 (pp.38) of [the original CLIP paper](https://arxiv.org/pdf/2103.00020.pdf), with a careful hyperparameter sweep.
 
-Note: please pull the latest Dassl (version >= `606a2c6`).
+This Jittor port includes its Dassl-compatible runtime. Before feature extraction, export `DATA_ROOT` and `JITTOR_RN50_WEIGHTS` as described in the root [README](../README.md#jittor-port).

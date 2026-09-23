@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.codex/
+output/
+clip_feat/
+lpclip/report/
+.DS_Store
+*.pt
+*.pkl

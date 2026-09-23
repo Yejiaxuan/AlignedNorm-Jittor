@@ -12,6 +12,7 @@ args = parser.parse_args()
 
 dataset = args.dataset
 dataset_path = os.path.join(f"{args.feature_dir}", dataset)
+report_prefix = os.path.basename(os.path.normpath(args.feature_dir))
 
 train_file = np.load(os.path.join(dataset_path, "train.npz"))
 train_feature, train_label = train_file["feature_list"], train_file["label_list"]
@@ -98,7 +99,7 @@ for num_shot in [1, 2, 4, 8, 16]:
 
             saveline = "{}, seed {}, {} shot, weight {}, test_acc {:.2f}\n".format(dataset, seed, num_shot, c_final, test_acc)
             with open(
-                "./report/{}_s{}r{}_details.txt".format(args.feature_dir, args.num_step, args.num_run),
+                "./report/{}_s{}r{}_details.txt".format(report_prefix, args.num_step, args.num_run),
                 "a+",
             ) as writer:
                 writer.write(saveline)
@@ -123,7 +124,7 @@ for num_shot in [1, 2, 4, 8, 16]:
     save_line = "{}, {} Shot, Test acc stat: {:.2f} ({:.2f})\n".format(dataset, num_shot, acc_mean, acc_std)
     print(save_line, flush=True)
     with open(
-        "./report/{}_s{}r{}.txt".format(args.feature_dir, args.num_step, args.num_run),
+        "./report/{}_s{}r{}.txt".format(report_prefix, args.num_step, args.num_run),
         "a+",
     ) as writer:
         writer.write(save_line)

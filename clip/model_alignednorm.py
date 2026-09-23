@@ -1,14 +1,17 @@
 from collections import OrderedDict
 from typing import Tuple, Union, Optional, Callable
 
+import jittor as jt
 import numpy as np
-import torch
-import torch.nn.functional as F
-from torch import nn
+from jittor import nn
+import jittor.attention as F
+from jittor.attention import MultiheadAttention
+from jittor import init
 
 import math
 from .hook import HookManager
 from .utils import MultiheadAttention as mha
+
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -28,7 +31,7 @@ class Bottleneck(nn.Module):
         self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
 
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU()
         self.downsample = None
         self.stride = stride
 
@@ -40,7 +43,7 @@ class Bottleneck(nn.Module):
                 ("1", nn.BatchNorm2d(planes * self.expansion))
             ]))
 
-    def forward(self, x: torch.Tensor):
+    def execute(self, x):
         identity = x
 
         out = self.relu(self.bn1(self.conv1(x)))
@@ -51,7 +54,7 @@ class Bottleneck(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out += identity
+        out = out + identity
         out = self.relu(out)
         return out
 
@@ -59,17 +62,17 @@ class Bottleneck(nn.Module):
 class AttentionPool2d(nn.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
-        self.positional_embedding = nn.Parameter(torch.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5)
+        self.positional_embedding = jt.randn((spacial_dim ** 2 + 1, embed_dim)) / embed_dim ** 0.5
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
         self.num_heads = num_heads
 
-    def forward(self, x):
-        x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).permute(2, 0, 1)  # NCHW -> (HW)NC
-        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
+    def execute(self, x):
+        x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3])).permute((2, 0, 1))  # NCHW -> (HW)NC
+        x = jt.concat([x.mean(dim=0, keepdims=True), x], dim=0)  # (HW+1)NC
+        x = x + self.positional_embedding[:, None, :].astype(x.dtype)  # (HW+1)NC
         x, _ = F.multi_head_attention_forward(
             query=x, key=x, value=x,
             embed_dim_to_check=x.shape[-1],
@@ -78,7 +81,7 @@ class AttentionPool2d(nn.Module):
             k_proj_weight=self.k_proj.weight,
             v_proj_weight=self.v_proj.weight,
             in_proj_weight=None,
-            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
+            in_proj_bias=jt.concat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
             bias_k=None,
             bias_v=None,
             add_zero_attn=False,
@@ -86,7 +89,7 @@ class AttentionPool2d(nn.Module):
             out_proj_weight=self.c_proj.weight,
             out_proj_bias=self.c_proj.bias,
             use_separate_proj_weight=True,
-            training=self.training,
+            training=self.is_training(),
             need_weights=False
         )
 
@@ -114,7 +117,7 @@ class ModifiedResNet(nn.Module):
         self.conv3 = nn.Conv2d(width // 2, width, kernel_size=3, padding=1, bias=False)
         self.bn3 = nn.BatchNorm2d(width)
         self.avgpool = nn.AvgPool2d(2)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU()
 
         # residual layers
         self._inplanes = width  # this is a *mutable* variable used during construction
@@ -122,7 +125,6 @@ class ModifiedResNet(nn.Module):
         self.layer2 = self._make_layer(width * 2, layers[1], stride=2)
         self.layer3 = self._make_layer(width * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(width * 8, layers[3], stride=2)
-
         embed_dim = width * 32  # the ResNet feature dimension
         self.attnpool = AttentionPool2d(input_resolution // 32, embed_dim, heads, output_dim)
 
@@ -135,14 +137,14 @@ class ModifiedResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def execute(self, x):
         def stem(x):
             for conv, bn in [(self.conv1, self.bn1), (self.conv2, self.bn2), (self.conv3, self.bn3)]:
                 x = self.relu(bn(conv(x)))
             x = self.avgpool(x)
             return x
 
-        x = x.type(self.conv1.weight.dtype)
+        x = x.astype(self.conv1.weight.dtype)
         x = stem(x)
         x = self.layer1(x)
         x = self.layer2(x)
@@ -154,17 +156,17 @@ class ModifiedResNet(nn.Module):
 
 
 class LayerNorm(nn.LayerNorm):
-    """Subclass torch's LayerNorm to handle fp16."""
+    """Subclass Jittor's LayerNorm to handle fp16."""
 
-    def forward(self, x: torch.Tensor):
+    def execute(self, x):
         orig_type = x.dtype
-        ret = super().forward(x.type(torch.float32))
-        return ret.type(orig_type)
+        ret = super().execute(x.float32())
+        return ret.astype(orig_type)
 
 
 class QuickGELU(nn.Module):
-    def forward(self, x: torch.Tensor):
-        return x * torch.sigmoid(1.702 * x)
+    def execute(self, x):
+        return x * jt.sigmoid(1.702 * x)
 
 
 class MLP(nn.Module):
@@ -180,7 +182,7 @@ class MLP(nn.Module):
         self.gelu = QuickGELU()
         self.c_proj = nn.Linear(mlp_width, d_model)
 
-    def forward(self, x, layer=None):
+    def execute(self, x, layer=None):
         x = self.hook("c_fc.post", ret=self.c_fc(x), layer=layer)
         x = self.hook("gelu.post", ret=self.gelu(x), layer=layer)
         x = self.hook("c_proj.post", ret=self.c_proj(x), layer=layer)
@@ -189,16 +191,18 @@ class MLP(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, text_layer=False, design_details=None, i=0, hook: Optional[HookManager] = None):
+    def __init__(self, d_model: int, n_head: int, attn_mask=None, text_layer=False, design_details=None, i=0, hook: Optional[HookManager] = None):
         super().__init__()
 
         # self.attn = mha(d_model, n_head, hook=hook.fork("attn"))
-        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.attn = MultiheadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
-        self.mlp = MLP(d_model, d_model * 4, hook=hook.fork("mlp"))
+        self.mlp = MLP(d_model, d_model * 4, hook=(hook or HookManager()).fork("mlp"))
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
-        
+        if self.attn_mask is not None:
+            self.attn_mask.persistent = False
+
         self.layer = i + 1
         self.rep_tokens_layers = design_details["rep_tokens_layers"]
         self.text_layer = text_layer
@@ -207,11 +211,11 @@ class ResidualAttentionBlock(nn.Module):
         self.beta = design_details["beta"]
         self.hook = hook or HookManager()
 
-    def attention(self, x: torch.Tensor):
-        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask) # [B, N, D], [B, H, N, N]
+    def attention(self, x):
+        attn_mask = self.attn_mask.astype(x.dtype) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=attn_mask) # [B, N, D], [B, H, N, N]
 
-    def forward(self, inputs: torch.Tensor):
+    def execute(self, inputs):
         if self.model == "CLIP":
             x = inputs
             after_attn = self.hook("after_attn", ret=self.attention(self.ln_1(x))[0], layer=self.layer)
@@ -236,13 +240,13 @@ class ResidualAttentionBlock(nn.Module):
                     if self.layer in self.rep_tokens_layers:
 
                         visual_context = compound_rep_tokens[counter]
-                        visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2)
+                        visual_context = visual_context.unsqueeze(1).broadcast((visual_context.shape[0], x.shape[1], visual_context.shape[1]))
                         
                         if self.layer == self.rep_tokens_layers[0]:
                             prefix = x[:1, :, :]
                             suffix = x[1:, :, :]
                             visual_context = self.hook("visual_context", ret=visual_context, layer=self.layer)
-                            x = torch.cat([prefix, visual_context, suffix], dim=0)         
+                            x = jt.concat([prefix, visual_context, suffix], dim=0)
                         else:
                             prefix = x[:1, :, :]
                             rep_tokens_prelayer = x[1:1 + self.n_rep_tokens, :, :]
@@ -252,7 +256,7 @@ class ResidualAttentionBlock(nn.Module):
                             hybrid_context = self.hook("hybrid_context", ret=hybrid_context, layer=self.layer)
                             #rep_tokens_prelayer = 0
                             suffix = x[1 + self.n_rep_tokens:, :, :]
-                            x = torch.cat([prefix, hybrid_context, suffix], dim=0)         
+                            x = jt.concat([prefix, hybrid_context, suffix], dim=0)
    
                         counter += 1    
 
@@ -261,7 +265,7 @@ class ResidualAttentionBlock(nn.Module):
                     if self.layer in self.rep_tokens_layers:
 
                         textual_context = compound_rep_tokens[counter]
-                        textual_context = textual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2)   
+                        textual_context = textual_context.unsqueeze(1).broadcast((textual_context.shape[0], x.shape[1], textual_context.shape[1]))
 
                         #insert tokens after bot
                         if self.layer == self.rep_tokens_layers[0]:
@@ -269,7 +273,7 @@ class ResidualAttentionBlock(nn.Module):
                             prefix = x[:1, :, :]
                             suffix = x[1:, :, :]
                             textual_context = self.hook("textual_context", ret=textual_context, layer=self.layer)
-                            x = torch.cat([prefix, textual_context, suffix], dim=0) 
+                            x = jt.concat([prefix, textual_context, suffix], dim=0)
                         else:
                             width = x.shape[0] - self.n_rep_tokens
                             prefix = x[:1, :, :]
@@ -280,15 +284,14 @@ class ResidualAttentionBlock(nn.Module):
                             hybrid_context = self.hook("hybrid_context", ret=hybrid_context, layer=self.layer)
                             #rep_tokens_prelayer = 0
                             suffix = x[1 + self.n_rep_tokens:, :, :]       
-                            x = torch.cat([prefix, hybrid_context, suffix], dim=0)          
+                            x = jt.concat([prefix, hybrid_context, suffix], dim=0)
 
                         counter += 1    
 
                     if self.layer >= self.rep_tokens_layers[0]:
                         width = x.shape[0]
-                        self.attn_mask = torch.empty(width, width)
-                        self.attn_mask.fill_(float("-inf"))
-                        self.attn_mask.triu_(1)  # zero out the lower diagonal  
+                        self.attn_mask = jt.triu(jt.full((width, width), float("-inf"), dtype="float32"), diagonal=1).stop_grad()
+                        self.attn_mask.persistent = False
             after_attn, attn_weights = self.attention(self.ln_1(x))
             
             after_attn = self.hook("after_attn", ret=after_attn, layer=self.layer)
@@ -301,12 +304,10 @@ class ResidualAttentionBlock(nn.Module):
             self.hook.finalize()
 
             return [x, compound_rep_tokens, counter, after_attn] # return again as a list, so that nn.seq can work   
-      
-
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, text_layer=False, design_details=None, hook: Optional[HookManager] = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask=None, text_layer=False, design_details=None, hook: Optional[HookManager] = None):
         super().__init__()
         self.width = width
         self.layers = layers
@@ -315,20 +316,19 @@ class Transformer(nn.Module):
         self.model = design_details["model"]
         self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask, text_layer, design_details, i, hook=self.hook.fork(f"resblocks.{i}")) for i in range(layers)])
 
-    def forward(self, x: torch.Tensor):
+    def execute(self, x):
         res_list = []
         res_att = []
         for idx, rb in enumerate(self.resblocks):
             x = rb(x)
             if self.model == "ALIGNEDNORM" and idx + 1 in self.rep_tokens_layers:
-                res_list.append(x[0].permute(1, 0, 2))
-                res_att.append(x[3].permute(1, 0, 2))
+                res_list.append(x[0].permute((1, 0, 2)))
+                res_att.append(x[3].permute((1, 0, 2)))
         self.hook.finalize()
         if self.model == "CLIP":
             return x
         elif self.model == "ALIGNEDNORM":
             return x, (res_list, res_att)
-
 
 
 class VisionTransformer(nn.Module):
@@ -340,22 +340,22 @@ class VisionTransformer(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
 
         scale = width ** -0.5
-        self.class_embedding = nn.Parameter(scale * torch.randn(width))
-        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.class_embedding = scale * jt.randn((width,))
+        self.positional_embedding = scale * jt.randn(((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
         self.transformer = Transformer(width, layers, heads, design_details=design_details, hook=self.hook.fork("transformer"))
 
         self.ln_post = LayerNorm(width)
-        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+        self.proj = scale * jt.randn((width, output_dim))
 
         lora_dim = design_details["proj_lora_dim"]
-        self.A = nn.Parameter(torch.zeros(width, lora_dim))
-        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-        self.B = nn.Parameter(torch.zeros(lora_dim, output_dim))
+        self.A = jt.zeros((width, lora_dim))
+        init.kaiming_uniform_(self.A, a=math.sqrt(5))
+        self.B = jt.zeros((lora_dim, output_dim))
 
         self.model = design_details["model"]
 
-    def forward(self, inputs):
+    def execute(self, inputs):
         if self.model == "CLIP":
             x = inputs
         elif self.model == "ALIGNEDNORM":
@@ -363,13 +363,13 @@ class VisionTransformer(nn.Module):
             compound_rep_tokens = inputs[1]
 
         x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
+        x = x.reshape((x.shape[0], x.shape[1], -1))  # shape = [*, width, grid ** 2]
+        x = x.permute((0, 2, 1))  # shape = [*, grid ** 2, width]
+        x = jt.concat([self.class_embedding.astype(x.dtype) + jt.zeros((x.shape[0], 1, x.shape[-1]), dtype=x.dtype), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.astype(x.dtype)
         x = self.ln_pre(x)
 
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute((1, 0, 2))  # NLD -> LND
         if self.model == "CLIP":
             outputs = self.transformer(x)
             x = outputs
@@ -377,7 +377,7 @@ class VisionTransformer(nn.Module):
             outputs, res_list = self.transformer([x, compound_rep_tokens, 0])
             x = outputs[0]
 
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute((1, 0, 2))  # LND -> NLD
 
         if self.proj is not None:
             if self.model == "ALIGNEDNORM":
@@ -385,18 +385,16 @@ class VisionTransformer(nn.Module):
                 x_rep = self.ln_post(x[:, 1:1+n_tokens, :])
                 x_rep_ln = x_rep.mean(dim=1)
                 proj_rep = self.proj + (self.A @ self.B)
-                x_rep = self.hook("proj_rep.post", ret=self.hook("proj_rep.pre", ret=x_rep_ln) @ proj_rep)
+                x_rep = self.hook("proj_rep.post", ret=self.hook("proj_rep.pre", ret=x_rep_ln).astype(proj_rep.dtype) @ proj_rep)
                 
             x_ln = self.ln_post(x[:, 0, :])
-            x = self.hook("proj.post", ret=self.hook("proj.pre", ret=x_ln) @ self.proj)
+            x = self.hook("proj.post", ret=self.hook("proj.pre", ret=x_ln).astype(self.proj.dtype) @ self.proj)
 
         self.hook.finalize()
         if self.model == "CLIP":     
             return x
         else:
             return x, x_rep, x_ln, x_rep_ln, res_list
-
-
 
 
 class CLIP(nn.Module):
@@ -455,74 +453,75 @@ class CLIP(nn.Module):
 
         self.vocab_size = vocab_size
         self.token_embedding = nn.Embedding(vocab_size, transformer_width)
-        self.positional_embedding = nn.Parameter(torch.empty(self.context_length, transformer_width))
+        self.positional_embedding = jt.empty((self.context_length, transformer_width))
         self.ln_final = LayerNorm(transformer_width)
 
-        self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.text_projection = jt.empty((transformer_width, embed_dim))
+        self.logit_scale = jt.ones(()) * np.log(1 / 0.07)
 
         self.initialize_parameters()
 
     def initialize_parameters(self):
-        nn.init.normal_(self.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.positional_embedding, std=0.01)
+        init.gauss_(self.token_embedding.weight, std=0.02)
+        init.gauss_(self.positional_embedding, std=0.01)
 
         if isinstance(self.visual, ModifiedResNet):
             if self.visual.attnpool is not None:
                 std = self.visual.attnpool.c_proj.in_features ** -0.5
-                nn.init.normal_(self.visual.attnpool.q_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.c_proj.weight, std=std)
+                init.gauss_(self.visual.attnpool.q_proj.weight, std=std)
+                init.gauss_(self.visual.attnpool.k_proj.weight, std=std)
+                init.gauss_(self.visual.attnpool.v_proj.weight, std=std)
+                init.gauss_(self.visual.attnpool.c_proj.weight, std=std)
 
             for resnet_block in [self.visual.layer1, self.visual.layer2, self.visual.layer3, self.visual.layer4]:
                 for name, param in resnet_block.named_parameters():
                     if name.endswith("bn3.weight"):
-                        nn.init.zeros_(param)
+                        init.zero_(param)
 
         proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
         attn_std = self.transformer.width ** -0.5
         fc_std = (2 * self.transformer.width) ** -0.5
         for block in self.transformer.resblocks:
-            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
-            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
-            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+            init.gauss_(block.attn.in_proj_weight, std=attn_std)
+            init.gauss_(block.attn.out_proj.weight, std=proj_std)
+            init.gauss_(block.mlp.c_fc.weight, std=fc_std)
+            init.gauss_(block.mlp.c_proj.weight, std=proj_std)
 
         if self.text_projection is not None:
-            nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
+            init.gauss_(self.text_projection, std=self.transformer.width ** -0.5)
 
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
-        # pytorch uses additive attention mask; fill with -inf
-        mask = torch.empty(self.context_length, self.context_length)
-        mask.fill_(float("-inf"))
-        mask.triu_(1)  # zero out the lower diagonal
-        return mask
+        # Jittor uses additive attention mask; fill with -inf
+        mask = jt.full((self.context_length, self.context_length), float("-inf"), dtype="float32")
+        return jt.triu(mask, diagonal=1).stop_grad()  # zero out the lower diagonal
 
     @property
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image):
-        return self.visual(image.type(self.dtype))
+        return self.visual(image.astype(self.dtype))
 
     def encode_text(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
+        x = self.token_embedding(text).astype(self.dtype)  # [batch_size, n_ctx, d_model]
 
-        x = x + self.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x + self.positional_embedding.astype(self.dtype)
+        x = x.permute((1, 0, 2))  # NLD -> LND
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = x.permute((1, 0, 2))  # LND -> NLD
+        x = self.ln_final(x).astype(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        eot = text.argmax(dim=-1)
+        if isinstance(eot, tuple):
+            eot = eot[0]
+        x = x[jt.arange(x.shape[0]), eot].astype(self.text_projection.dtype) @ self.text_projection
 
         return x
 
-    def forward(self, image, text):
+    def execute(self, image, text):
         image_features = self.encode_image(image)
         text_features = self.encode_text(text)
 
@@ -532,8 +531,8 @@ class CLIP(nn.Module):
 
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
-        logits_per_image = logit_scale * image_features @ text_features.t()
-        logits_per_text = logit_scale * text_features @ image_features.t()
+        logits_per_image = logit_scale * (image_features @ text_features.astype(image_features.dtype).transpose(1, 0))
+        logits_per_text = logit_scale * (text_features @ image_features.astype(text_features.dtype).transpose(1, 0))
 
         # shape = [global_batch_size, global_batch_size]
         return logits_per_image, logits_per_text
@@ -544,21 +543,21 @@ def convert_weights(model: nn.Module):
 
     def _convert_weights_to_fp16(l):
         if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Linear)):
-            l.weight.data = l.weight.data.half()
+            l.weight.assign(l.weight.float16())
             if l.bias is not None:
-                l.bias.data = l.bias.data.half()
+                l.bias.assign(l.bias.float16())
 
-        if isinstance(l, nn.MultiheadAttention):
+        if isinstance(l, MultiheadAttention):
             for attr in [*[f"{s}_proj_weight" for s in ["in", "q", "k", "v"]], "in_proj_bias", "bias_k", "bias_v"]:
                 tensor = getattr(l, attr)
                 if tensor is not None:
-                    tensor.data = tensor.data.half()
+                    tensor.assign(tensor.float16())
 
         for name in ["text_projection", "proj"]:
             if hasattr(l, name):
                 attr = getattr(l, name)
                 if attr is not None:
-                    attr.data = attr.data.half()
+                    attr.assign(attr.float16())
 
     model.apply(_convert_weights_to_fp16)
 
@@ -601,6 +600,5 @@ def build_model_ALIGNEDNORM(state_dict: dict, design_details, hook: Optional[Hoo
         if key in state_dict:
             del state_dict[key]
 
-    convert_weights(model)
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict)
     return model.eval(), (vision_layers, transformer_layers)

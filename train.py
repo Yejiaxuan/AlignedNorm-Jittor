@@ -1,5 +1,7 @@
 import argparse
-import torch
+import os
+
+import jittor as jt
 
 from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import get_cfg_default
@@ -7,6 +9,7 @@ from dassl.engine import build_trainer
 from trainers.alignednorm_config import (
     get_dataset_specified_config as get_alignednorm_cfg,
 )
+from trainers.config import get_dataset_specified_config as get_mmrl_cfg
 from yacs.config import CfgNode as CN
 
 # custom
@@ -79,6 +82,9 @@ def reset_cfg(cfg, args):
     if args.head:
         cfg.MODEL.HEAD.NAME = args.head
 
+    if args.clip_weights:
+        cfg.JITTOR.CLIP_WEIGHTS = args.clip_weights
+
 
 def extend_cfg(cfg):
     """
@@ -98,7 +104,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.MMRL.REP_LAYERS = []
     cfg.TRAINER.MMRL.REP_DIM = 512
     cfg.TRAINER.MMRL.N_REP_TOKENS = 5  # number of representation tokens per layer
-    cfg.TRAINER.MMRL.PREC = "fp16"  # fp16, fp32, amp
+    cfg.TRAINER.MMRL.PREC = "fp32"
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.TASK = "B2N" #B2N, CD, FS
 
@@ -111,7 +117,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.MMRLpp.N_REP_TOKENS = 5  # number of representation tokens per layer
     cfg.TRAINER.MMRLpp.PROJ_LORA_DIM = 64
     cfg.TRAINER.MMRLpp.RES_LORA_DIM = 4
-    cfg.TRAINER.MMRLpp.PREC = "fp16"  # fp16, fp32, amp
+    cfg.TRAINER.MMRLpp.PREC = "fp32"
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.TASK = "B2N" #B2N, CD, FS
     
@@ -126,10 +132,13 @@ def extend_cfg(cfg):
     cfg.TRAINER.ALIGNEDNORM.N_REP_TOKENS = 5  # number of representation tokens per layer
     cfg.TRAINER.ALIGNEDNORM.PROJ_LORA_DIM = 64
     cfg.TRAINER.ALIGNEDNORM.RES_LORA_DIM = 4
-    cfg.TRAINER.ALIGNEDNORM.PREC = "fp16"  # fp16, fp32, amp
+    cfg.TRAINER.ALIGNEDNORM.PREC = "fp32"
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
     cfg.TASK = "B2N" #B2N, CD, FS
-    cfg.DATALOADER.RETURN_IMG0 = True
+    cfg.TEST.B2N_DECOUPLED = False
+
+    cfg.JITTOR = CN()
+    cfg.JITTOR.CLIP_WEIGHTS = os.environ.get("JITTOR_CLIP_WEIGHTS", "")
     
 def setup_cfg(args):
     cfg = get_cfg_default()
@@ -147,16 +156,24 @@ def setup_cfg(args):
     reset_cfg(cfg, args)
 
     # 4. Override dataset specific config
-    cfg.merge_from_list(
-        get_alignednorm_cfg(
-            dataset=cfg.DATASET.NAME,
-            trainer=cfg.TRAINER.NAME,
-            task=args.opts[args.opts.index("TASK") + 1],
-        )
+    task = (
+        args.opts[args.opts.index("TASK") + 1]
+        if args.opts and "TASK" in args.opts
+        else cfg.TASK
     )
+    get_dataset_cfg = (
+        get_alignednorm_cfg if cfg.TRAINER.NAME == "ALIGNEDNORM" else get_mmrl_cfg
+    )
+    cfg.merge_from_list(get_dataset_cfg(cfg.DATASET.NAME, cfg.TRAINER.NAME, task))
 
     # 5. From optional input arguments
-    cfg.merge_from_list(args.opts)
+    if args.opts:
+        cfg.merge_from_list(args.opts)
+
+    if not cfg.JITTOR.CLIP_WEIGHTS:
+        raise ValueError(
+            "Jittor CLIP weights are required; pass --clip-weights or set JITTOR_CLIP_WEIGHTS"
+        )
 
     cfg.freeze()
 
@@ -165,13 +182,13 @@ def setup_cfg(args):
 
 def main(args):
     cfg = setup_cfg(args)
+    jt.flags.use_cuda = 1 if cfg.USE_CUDA else 0
+    jt.flags.amp_level = 0
+    jt.flags.auto_mixed_precision_level = 0
     if cfg.SEED >= 0:
         print("Setting fixed seed: {}".format(cfg.SEED))
         set_random_seed(cfg.SEED)
     setup_logger(cfg.OUTPUT_DIR)
-
-    if torch.cuda.is_available() and cfg.USE_CUDA:
-        torch.backends.cudnn.benchmark = True
 
     print_args(args, cfg)
     print("Collecting env info ...")
@@ -237,6 +254,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--no-train", action="store_true", help="do not call trainer.train()"
+    )
+    parser.add_argument(
+        "--clip-weights",
+        type=str,
+        default=os.environ.get("JITTOR_CLIP_WEIGHTS", ""),
+        help="converted Jittor CLIP checkpoint",
     )
     parser.add_argument(
         "opts",

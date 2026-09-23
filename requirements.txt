@@ -1,0 +1,17 @@
+# Runtime dependencies of the Jittor implementation.
+# Jittor compiles its own operators on first use and does not need PyTorch.
+jittor==1.3.11.0
+numpy
+pillow
+yacs
+ftfy
+regex
+scipy
+scikit-learn
+tensorboard
+tabulate
+tqdm
+
+# Optional: only tools/convert_clip_weights.py needs PyTorch.
+# See README.md for conversion instructions.
+# torch

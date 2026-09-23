@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # custom config
-DATA_ROOT="/path/to/your/datasets"
+DATA_ROOT="${DATA_ROOT:-/path/to/your/datasets}"
 DATA="${DATA_ROOT}"
 TRAINER=ALIGNEDNORM
 

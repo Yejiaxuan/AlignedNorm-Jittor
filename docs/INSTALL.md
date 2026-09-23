@@ -1,46 +1,15 @@
 # Installation
 
-### Acknowledgement: This readme file for installing datasets is modified from [MaPLe's](https://github.com/muzairkhattak/multimodal-prompt-learning) official repository.
+Run from the repository root:
 
-This codebase is tested on Ubuntu 20.04.2 LTS with python 3.9. Follow the below steps to create environment and install dependencies.
-
-* Setup conda environment (recommended).
 ```bash
-# Create a conda environment
-conda create -y -n alignednorm python=3.9
-
-# Activate the environment
-conda activate alignednorm
-
-# Install torch (requires version >= 1.8.1) and torchvision
-# Please refer to https://pytorch.org/get-started/previous-versions/ if you need a different cuda version
-pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
-```
-
-* Clone AlignedNorm code repository and install requirements
-```bash
-# Clone AlignedNorm code base
-git clone https://github.com/QByteM/AlignedNorm.git
-
-cd AlignedNorm/
-# Install requirements
-
+conda create -n alignednorm-jittor python=3.9 -y
+conda activate alignednorm-jittor
 pip install -r requirements.txt
-
-cd ..
 ```
 
-* Install dassl library.
-```bash
-# Instructions borrowed from https://github.com/KaiyangZhou/Dassl.pytorch#installation
+The port targets Python 3.9 and Jittor 1.3.11.0. Jittor compiles operators on first use, so the initial run may take longer. For GPU execution, use a compatible NVIDIA driver and CUDA environment.
 
-# Clone this repo
-# original source: https://github.com/KaiyangZhou/Dassl.pytorch.git
-cd Dassl.pytorch/
+The required Dassl-compatible runtime is included in `dassl/`; no separate `Dassl.pytorch` installation is needed. PyTorch is only required when converting original CLIP weights.
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Install this library (no need to re-build if the source code is modified)
-python setup.py develop
-```
+See the [README](../README.md#jittor-port) for weight conversion and training commands, and [DATASETS.md](DATASETS.md) for dataset layout.

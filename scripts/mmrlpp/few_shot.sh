@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # custom config
-DATA="/Anonymous/data/DATA_prompt_training"
+DATA="${DATA_ROOT:-/path/to/your/datasets}"
 TRAINER=MMRLpp
 SHOTS=16
 
